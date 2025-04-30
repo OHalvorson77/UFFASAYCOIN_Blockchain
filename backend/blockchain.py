@@ -47,7 +47,7 @@ class Blockchain:
 
         if self.consensus == "pow":
             new_block = Block(index=last_block.index + 1,
-                              transactions=[tx.to_dict() for tx in self.unconfirmed_transactions],
+                              transactions = self.unconfirmed_transactions.copy(),
                               timestamp=time.time(),
                               previous_hash=last_block.hash)
 
@@ -59,7 +59,7 @@ class Blockchain:
         elif self.consensus == "pos":
             validator = self.validators.select_validator()
             new_block = Block(index=last_block.index + 1,
-                              transactions=[tx.to_dict() for tx in self.unconfirmed_transactions],
+                              transactions = self.unconfirmed_transactions.copy(),
                               timestamp=time.time(),
                               previous_hash=last_block.hash,
                               validator=validator)

@@ -1,32 +1,128 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from blockchain import Blockchain
-import time
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from pymongo import MongoClient
+import datetime
+import hashlib
+import uuid
 
-app = FastAPI()
-blockchain = Blockchain()
+app = Flask(__name__)
+CORS(app)
 
-class Transaction(BaseModel):
-    sender: str
-    recipient: str
-    amount: float
+client = MongoClient('mongodb://localhost:27017/')
+db = client.blockchain_app
+blockchain = db.chain
+transactions = db.pending_transactions
+users = db.users
 
-@app.get("/chain")
-def get_chain():
+from bson import ObjectId
+
+def convert_objectid(obj):
+    if isinstance(obj, list):
+        return [convert_objectid(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {k: convert_objectid(v) for k, v in obj.items()}
+    elif isinstance(obj, ObjectId):
+        return str(obj)
+    else:
+        return obj
+
+
+# Utility: create wallet with public/private keys
+def create_wallet():
     return {
-        "length": len(blockchain.chain),
-        "chain": [block.__dict__ for block in blockchain.chain]
+        "address": str(uuid.uuid4()),
+        "balance": 100  # Initial airdrop
     }
 
-@app.post("/transaction")
-def add_transaction(transaction: Transaction):
-    blockchain.add_transaction(transaction.dict())
-    return {"message": "Transaction added successfully."}
+# Blockchain: create genesis block if empty
+if blockchain.count_documents({}) == 0:
+    genesis_block = {
+        "index": 0,
+        "timestamp": str(datetime.datetime.now()),
+        "transactions": [],
+        "previous_hash": "0",
+        "hash": "0"
+    }
+    blockchain.insert_one(genesis_block)
 
-@app.post("/mine")
-def mine_block():
-    result = blockchain.mine("miner_address")
-    if result:
-        return {"message": f"Block #{result} mined successfully."}
-    else:
-        raise HTTPException(status_code=400, detail="No transactions to mine.")
+# Hashing function
+def hash_block(block):
+    block_str = f"{block['index']}{block['timestamp']}{block['transactions']}{block['previous_hash']}"
+    return hashlib.sha256(block_str.encode()).hexdigest()
+
+@app.route('/register', methods=['POST'])
+def register():
+    data = request.json
+    username = data['username']
+    if users.find_one({"username": username}):
+        return jsonify({"error": "User already exists"}), 400
+    wallet = create_wallet()
+    users.insert_one({ "username": username, "wallet": wallet })
+    return jsonify({ "username": username, "wallet": wallet })
+
+@app.route('/wallet/<username>', methods=['GET'])
+def get_wallet(username):
+    user = users.find_one({ "username": username })
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify(user['wallet'])
+
+@app.route('/transaction', methods=['POST'])
+def add_transaction():
+    data = request.json
+    transactions.insert_one(data)
+    return jsonify({ "message": "Transaction added" })
+
+@app.route('/login', methods=['POST'])
+def login():
+    data = request.get_json()
+    username = data['username']
+
+    user = users.find_one({"username": username})
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    
+    
+    return jsonify({
+            "username": username,
+            "wallet": {
+                "address": user['wallet']['address'],
+                "balance": user['wallet']['balance']
+            }
+        })
+
+
+
+
+@app.route('/mine', methods=['POST'])
+def mine():
+    pending = list(transactions.find({}, {'_id': 0}))  # Exclude _id from transactions
+
+    if not pending:
+        return jsonify({ "message": "No transactions to mine" }), 400
+
+    last_block = blockchain.find().sort("index", -1).limit(1)[0]
+
+    new_block = {
+        "index": last_block["index"] + 1,
+        "timestamp": str(datetime.datetime.now()),
+        "transactions": pending,
+        "previous_hash": last_block["hash"]
+    }
+    new_block["hash"] = hash_block(new_block)
+
+    # Insert and get inserted block (with ObjectId)
+    inserted = blockchain.insert_one(new_block)
+    new_block['_id'] = str(inserted.inserted_id)  # Convert to string if you want to include it
+    transactions.delete_many({})
+
+    return jsonify({ "message": "Block mined", "block": new_block })
+
+@app.route('/chain', methods=['GET'])
+def get_chain():
+    chain = list(blockchain.find({}, { "_id": 0 }))
+    return jsonify({ "chain": convert_objectid(chain) })
+
+if __name__ == '__main__':
+    app.run(debug=True)
